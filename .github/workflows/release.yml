@@ -1,0 +1,287 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create and publish (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  prepare:
+    name: Prepare & Validate Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+      build_date: ${{ steps.meta.outputs.build_date }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release version metadata
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semver tag: $TAG (expected e.g. v0.1.0 or v1.0.0-rc.1)" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          PRERELEASE="false"
+          if [[ "$TAG" == *-* ]]; then
+            PRERELEASE="true"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Management Console UI
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Run Go vet & tests
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: Upload built frontend bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: internal/web/dist
+          retention-days: 1
+
+  build-binaries:
+    name: Build Binaries (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download built frontend bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: internal/web/dist
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Cross-compile static binary & package archive
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          VER="${{ needs.prepare.outputs.version }}"
+          COMMIT="${{ needs.prepare.outputs.commit }}"
+          DATE="${{ needs.prepare.outputs.build_date }}"
+          BIN_NAME="godesk-plane${{ matrix.ext }}"
+          STAGE="dist/godesk-plane_${VER}_${GOOS}_${GOARCH}"
+          mkdir -p "$STAGE"
+
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${TAG} -X main.commit=${COMMIT} -X main.date=${DATE}" \
+            -o "${STAGE}/${BIN_NAME}" ./cmd/godesk-plane
+
+          cp README.md .env.example docker-compose.yml "$STAGE/"
+
+          mkdir -p release-assets
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd dist && zip -qr "../release-assets/godesk-plane_${VER}_${GOOS}_${GOARCH}.zip" "godesk-plane_${VER}_${GOOS}_${GOARCH}")
+          else
+            tar -czf "release-assets/godesk-plane_${VER}_${GOOS}_${GOARCH}.tar.gz" -C dist "godesk-plane_${VER}_${GOOS}_${GOARCH}"
+          fi
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release-assets/*
+          retention-days: 1
+
+  publish-docker:
+    name: Publish Multi-Arch Docker Image (GHCR)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute Docker image metadata
+        id: docker-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.tag }}
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+
+      - name: Build and push multi-arch Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.docker-meta.outputs.tags }}
+          labels: ${{ steps.docker-meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.tag }}
+            COMMIT=${{ needs.prepare.outputs.commit }}
+            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  github-release:
+    name: Create GitHub Release
+    needs: [prepare, build-binaries, publish-docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        working-directory: release-assets
+        run: |
+          sha256sum godesk-plane_* > checksums.txt
+          cat checksums.txt
+
+      - name: Ensure git tag exists (for workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          IMAGE_LOWER="$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          cat > release-notes.md <<EOF
+          ## Docker Image (multi-arch: \`linux/amd64\`, \`linux/arm64\`)
+
+          \`\`\`bash
+          docker pull ${IMAGE_LOWER}:${TAG}
+          \`\`\`
+
+          ## Quick Run (Docker)
+
+          \`\`\`bash
+          docker run -d --name godesk-plane --restart unless-stopped \\
+            -p 21114:21114 -p 21115:21115 -p 21116:21116 -p 21116:21116/udp \\
+            -p 21117:21117 -p 21118:21118 -p 21119:21119 \\
+            -v godesk-data:/data \\
+            ${IMAGE_LOWER}:${TAG}
+          \`\`\`
+
+          ## Standalone Pure-Go Binaries
+          Download the archive for your OS/architecture below and verify with \`checksums.txt\`.
+          EOF
+
+          FLAGS=(--title "GoDesk Plane ${TAG}" --generate-notes --notes-file release-notes.md)
+          if [ "$PRERELEASE" = "true" ]; then
+            FLAGS+=(--prerelease)
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* "${FLAGS[@]}"
+          fi

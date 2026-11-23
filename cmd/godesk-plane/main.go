@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -21,7 +22,20 @@ import (
 	"github.com/KriszW/godesk-plane/internal/web"
 )
 
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
+	for _, arg := range os.Args[1:] {
+		if arg == "-v" || arg == "-version" || arg == "--version" {
+			fmt.Printf("godesk-plane %s (commit %s, built %s)\n", version, commit, date)
+			return
+		}
+	}
+
 	cfg := config.Load()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -29,7 +43,7 @@ func main() {
 
 	tel, err := telemetry.Init(ctx, telemetry.Options{
 		ServiceName:    cfg.OTelServiceName,
-		ServiceVersion: "1.0.0",
+		ServiceVersion: version,
 		LogLevel:       cfg.LogLevel,
 		LogFormat:      cfg.LogFormat,
 		OTelEnabled:    cfg.OTelEnabled,
@@ -52,6 +66,8 @@ func main() {
 
 	slog.Info("starting GoDesk Plane",
 		"component", "main",
+		"version", version,
+		"commit", commit,
 		"log_level", cfg.LogLevel,
 		"log_format", cfg.LogFormat,
 		"otel_enabled", cfg.OTelEnabled && cfg.OTelEndpoint != "",
