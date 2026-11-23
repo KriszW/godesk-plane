@@ -1,0 +1,40 @@
+services:
+  godesk-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: godesk-plane:latest
+    container_name: godesk-plane
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-21114}:21114/tcp"        # RustDesk Client API & Management Web UI
+      - "${NAT_PORT:-21115}:21115/tcp"         # RustDesk NAT Type Test & Online Status
+      - "${RENDEZVOUS_PORT:-21116}:21116/tcp"  # RustDesk Rendezvous Signaling (hbbs TCP)
+      - "${RENDEZVOUS_PORT:-21116}:21116/udp"  # RustDesk ID Registration (hbbs UDP)
+      - "${RELAY_PORT:-21117}:21117/tcp"       # RustDesk Encrypted Relay (hbbr TCP)
+      - "${RENDEZVOUS_WS_PORT:-21118}:21118/tcp" # RustDesk Rendezvous WebSocket
+      - "${RELAY_WS_PORT:-21119}:21119/tcp"    # RustDesk Relay WebSocket
+    environment:
+      DATA_DIR: /data
+      PUBLIC_HOST: "${PUBLIC_HOST:-localhost}"
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-godesk-admin}"
+      ADMIN_EMAIL: "${ADMIN_EMAIL:-admin@localhost}"
+      REQUIRE_KEY: "${REQUIRE_KEY:-true}"
+      ALWAYS_USE_RELAY: "${ALWAYS_USE_RELAY:-false}"
+      RELAY_SERVERS: "${RELAY_SERVERS:-}"
+      LOCAL_MASK: "${LOCAL_MASK:-}"
+      LOCAL_IP: "${LOCAL_IP:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      METRICS_ENABLED: "${METRICS_ENABLED:-true}"
+      OTEL_ENABLED: "${OTEL_ENABLED:-false}"
+      OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-godesk-plane}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}"
+      OTEL_EXPORTER_OTLP_INSECURE: "${OTEL_EXPORTER_OTLP_INSECURE:-true}"
+    volumes:
+      - godesk-data:/data
+
+volumes:
+  godesk-data:

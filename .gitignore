@@ -1,0 +1,12 @@
+/data/
+/bin/
+*.db
+*.db-wal
+*.db-shm
+id_ed25519
+id_ed25519.pub
+.env
+web/node_modules/
+*.tsbuildinfo
+internal/web/dist/*
+!internal/web/dist/.gitkeep
